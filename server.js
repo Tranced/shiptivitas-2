@@ -6,7 +6,7 @@ const app = express();
 app.use(express.json());
 
 app.get('/', (req, res) => {
-  return res.status(200).send({'message': 'SHIPTIVITY API. Read documentation to see API docs'});
+  return res.status(200).send({ 'message': 'SHIPTIVITY API. Read documentation to see API docs' });
 });
 
 // We are keeping one connection alive for the rest of the life application for simplicity
@@ -26,8 +26,8 @@ const validateId = (id) => {
     return {
       valid: false,
       messageObj: {
-      'message': 'Invalid id provided.',
-      'long_message': 'Id can only be integer.',
+        'message': 'Invalid id provided.',
+        'long_message': 'Id can only be integer.',
       },
     };
   }
@@ -36,8 +36,8 @@ const validateId = (id) => {
     return {
       valid: false,
       messageObj: {
-      'message': 'Invalid id provided.',
-      'long_message': 'Cannot find client with that id.',
+        'message': 'Invalid id provided.',
+        'long_message': 'Cannot find client with that id.',
       },
     };
   }
@@ -55,8 +55,8 @@ const validatePriority = (priority) => {
     return {
       valid: false,
       messageObj: {
-      'message': 'Invalid priority provided.',
-      'long_message': 'Priority can only be positive integer.',
+        'message': 'Invalid priority provided.',
+        'long_message': 'Priority can only be positive integer.',
       },
     };
   }
@@ -92,7 +92,7 @@ app.get('/api/v1/clients', (req, res) => {
  * GET /api/v1/clients/{client_id} - get client by id
  */
 app.get('/api/v1/clients/:id', (req, res) => {
-  const id = parseInt(req.params.id , 10);
+  const id = parseInt(req.params.id, 10);
   const { valid, messageObj } = validateId(id);
   if (!valid) {
     res.status(400).send(messageObj);
@@ -114,8 +114,23 @@ app.get('/api/v1/clients/:id', (req, res) => {
  *      priority (optional): integer,
  *
  */
+const validateStatus = (status) => {
+  if (status !== "backlog" && status !== "in-progress" && status !== "complete") {
+    return {
+      valid: false,
+      messageObj: {
+        'message': 'Invalid status provided.',
+        'long_message': 'Status can only be backlog, in-progress, or complete',
+      },
+    };
+  }
+  return {
+    valid: true,
+  }
+}
+
 app.put('/api/v1/clients/:id', (req, res) => {
-  const id = parseInt(req.params.id , 10);
+  const id = parseInt(req.params.id, 10);
   const { valid, messageObj } = validateId(id);
   if (!valid) {
     res.status(400).send(messageObj);
@@ -123,11 +138,83 @@ app.put('/api/v1/clients/:id', (req, res) => {
 
   let { status, priority } = req.body;
   let clients = db.prepare('select * from clients').all();
-  const client = clients.find(client => client.id === id);
-
+  let client = clients.find(client => client.id === id);
   /* ---------- Update code below ----------*/
+  if (status === undefined && priority === undefined) {
+    //short circuit if both things are undefined
+    return res.status(200).send(clients);
+  }
+
+  if (status !== undefined) {
+    const { valid, messageObj } = validateStatus(status);
+    if (!valid) {
+      return res.status(400).send(messageObj);
+    }
+  }
+  if (priority !== undefined) {
+    const { valid, messageObj } = validatePriority(priority);
+    if (!valid) {
+      return res.status(400).send(messageObj);
+    }
+  }
+  if (client.status === status && client.priority === priority || status === undefined && client.priority === priority || client.status === status && priority === undefined) {
+    //short circuit if put parameters are same as existing client
+    return res.status(200).send(clients);
+  }
+  let laneLength = clients.filter(client => client.status === status).length
 
 
+  const update = db.prepare('update clients set status=?, priority=? where id=?')
+  //Assuming status is different
+  if (status) {
+    update.run(status, laneLength, id);
+    const prevLane = db.prepare('update clients set priority=priority-1 where priority > ? and status = ?')
+    prevLane.run(client.priority, client.status);
+    client.priority = laneLength;
+  }
+  laneLength = clients.filter(client => client.status === status).length;
+  //if status is different, row is appended to the end of new status
+  //if it's not, we're working in the same swimlane
+  if (priority) {
+    const shiftLane = db.prepare('update clients set priority=priority-1 where priority > ? and status = ?');
+    const makeSpace = db.prepare('update clients set priority=priority+1 where priority >= ? and status = ?');
+    // const unMakeSpace = db.prepare('update clients set priority=priority-1 where priority >= ? and status = ?');
+
+
+    //assigning lowest priority in same lane
+    if (priority >= laneLength && client.status === status) {
+
+      //append to end
+      update.run(status, laneLength, id);
+      //shift back 
+      shiftLane.run(client.priority, client.status);
+
+      //if priority gets lowered
+    } else if (priority > client.priority && priority < laneLength) {
+
+      makeSpace.run(priority, client.status)
+      //insert
+      update.run(status, priority, id);
+      shiftLane.run(client.priority - 1, status);
+      //priority get increased
+    } else if (priority < client.priority) {
+
+      update.run(status, 0, id);
+      //shift all rows above to priority-1
+      if (client.priority < laneLength - 1) {
+        shiftLane.run(client.priority, status);
+      }
+
+      //make empty space at priority
+      makeSpace.run(priority, status);
+
+      //insert into empty space
+      update.run(status, priority, id);
+    }
+
+  }
+
+  clients = db.prepare('select * from clients').all();
 
   return res.status(200).send(clients);
 });
